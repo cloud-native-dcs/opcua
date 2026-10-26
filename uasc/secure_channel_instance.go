@@ -211,11 +211,17 @@ func (c *channelInstance) signAndEncrypt(m *Message, b []byte) ([]byte, error) {
 }
 
 func (c *channelInstance) verifyAndDecrypt(m *MessageChunk, r []byte) ([]byte, error) {
-	if c.sc.cfg.SecurityMode == ua.MessageSecurityModeNone {
+	// An OpenSecureChannel chunk is secured with the asymmetric keys
+	// whenever its own header names a policy other than None, whatever the
+	// channel's configured mode says. On a server the configured mode is
+	// still the default, None, when the first OPN arrives: the mode is read
+	// out of the request this very chunk carries, so it cannot decide
+	// whether to decrypt the chunk that carries it.
+	isAsymmetric := m.AsymmetricSecurityHeader != nil
+	securedOPN := isAsymmetric && m.SecurityPolicyURI != ua.SecurityPolicyURINone
+	if c.sc.cfg.SecurityMode == ua.MessageSecurityModeNone && !securedOPN {
 		return m.Data, nil
 	}
-
-	isAsymmetric := m.AsymmetricSecurityHeader != nil
 
 	headerLength := 12
 

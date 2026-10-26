@@ -522,6 +522,10 @@ func (s *SecureChannel) readChunk() (*MessageChunk, error) {
 		s.cfg.SecurityPolicyURI = m.SecurityPolicyURI
 		if m.SecurityPolicyURI != ua.SecurityPolicyURINone {
 			s.cfg.RemoteCertificate = m.AsymmetricSecurityHeader.SenderCertificate
+			// The response is encrypted for the sender, so its asymmetric
+			// header names the sender certificate's thumbprint (Part 6,
+			// 6.7.2). The server's config carries none until here.
+			s.cfg.Thumbprint = uapolicy.Thumbprint(s.cfg.RemoteCertificate)
 			debug.Printf("uasc %d: setting securityPolicy to %s", s.c.ID(), m.SecurityPolicyURI)
 
 			remoteCert, err := x509.ParseCertificate(s.cfg.RemoteCertificate)
