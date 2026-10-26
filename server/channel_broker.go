@@ -33,17 +33,22 @@ type channelBroker struct {
 	// get funneled into for handling
 	msgChan chan *uasc.MessageBody
 	logger  Logger
+
+	// verifyCertificate is asked about the sender certificate of every
+	// secured OpenSecureChannel; nil accepts every certificate.
+	verifyCertificate ClientCertificateVerifier
 }
 
-func newChannelBroker(logger Logger) *channelBroker {
+func newChannelBroker(logger Logger, verify ClientCertificateVerifier) *channelBroker {
 	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	return &channelBroker{
-		endpoints:       make(map[string]*ua.EndpointDescription),
-		s:               make(map[uint32]*uasc.SecureChannel),
-		msgChan:         make(chan *uasc.MessageBody),
-		secureChannelID: uint32(rng.Int31()),
-		secureTokenID:   uint32(rng.Int31()),
-		logger:          logger,
+		endpoints:         make(map[string]*ua.EndpointDescription),
+		s:                 make(map[uint32]*uasc.SecureChannel),
+		msgChan:           make(chan *uasc.MessageBody),
+		secureChannelID:   uint32(rng.Int31()),
+		secureTokenID:     uint32(rng.Int31()),
+		logger:            logger,
+		verifyCertificate: verify,
 	}
 }
 
@@ -55,6 +60,9 @@ func (c *channelBroker) RegisterConn(ctx context.Context, conn *uacp.Conn, local
 	cfg := defaultChannelConfig()
 	cfg.Certificate = localCert
 	cfg.LocalKey = localKey
+	if c.verifyCertificate != nil {
+		cfg.VerifyRemoteCertificate = c.verifyCertificate
+	}
 
 	c.mu.Lock()
 	c.secureChannelID++
@@ -109,6 +117,11 @@ outer:
 				if c.logger != nil {
 					c.logger.Error("Secure Channel %d error: %s", secureChannelID, msg.Err)
 				}
+				// Nothing reads this connection after an error; close it so
+				// the client learns the channel is gone rather than waiting
+				// out its request timeout. An ERR message, if one was owed,
+				// has already been sent.
+				_ = conn.Close()
 				break outer
 			}
 			// todo(fs): honor ctx

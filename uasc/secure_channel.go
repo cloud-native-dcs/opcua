@@ -156,6 +156,12 @@ type SecureChannel struct {
 	closing      chan struct{}
 	disconnected chan struct{}
 
+	// terminalErr is the ERR message the peer sent before closing the
+	// connection, if it sent one. A request still waiting when the channel
+	// disconnects is answered with it instead of io.EOF.
+	terminalErr   error
+	terminalErrMu sync.Mutex
+
 	// startDispatcher ensures only one dispatcher is running
 	startDispatcher sync.Once
 
@@ -307,6 +313,13 @@ func (s *SecureChannel) dispatcher() {
 			return
 		default:
 			msg := s.Receive(ctx)
+			// An ERR message is the peer's last word before it closes the
+			// connection; keep it so the request waiting on the channel
+			// is answered with the reason rather than the EOF that follows.
+			var uacperr *uacp.Error
+			if errors.As(msg.Err, &uacperr) {
+				s.setTerminalErr(msg.Err)
+			}
 			if msg.Err != nil && msg.isChannelError() {
 				select {
 				case <-s.closing:
@@ -482,13 +495,15 @@ func (s *SecureChannel) Receive(ctx context.Context) *MessageBody {
 func (s *SecureChannel) readChunk() (*MessageChunk, error) {
 	// read a full message from the underlying conn.
 	b, err := s.c.Receive()
-	if err == io.EOF || len(b) == 0 {
-		return nil, io.EOF
-	}
-	// do not wrap this error since it hides conn error
+	// An ERR message comes back with no payload, so it is asked about
+	// before an empty read is taken for the connection closing; it is not
+	// wrapped, since wrapping hides the conn error.
 	var uacperr *uacp.Error
 	if errors.As(err, &uacperr) {
 		return nil, err
+	}
+	if err == io.EOF || len(b) == 0 {
+		return nil, io.EOF
 	}
 	if err != nil {
 		return nil, errors.Errorf("sechan: read header failed: %s %#v", err, err)
@@ -527,6 +542,18 @@ func (s *SecureChannel) readChunk() (*MessageChunk, error) {
 			// 6.7.2). The server's config carries none until here.
 			s.cfg.Thumbprint = uapolicy.Thumbprint(s.cfg.RemoteCertificate)
 			debug.Printf("uasc %d: setting securityPolicy to %s", s.c.ID(), m.SecurityPolicyURI)
+
+			// The application decides whether this certificate may open a
+			// channel, before any key is derived from it. A refusal is
+			// answered with an ERR message, which closes the connection
+			// (Part 6, 7.1.4).
+			if s.cfg.VerifyRemoteCertificate != nil {
+				if err := s.cfg.VerifyRemoteCertificate(s.cfg.RemoteCertificate); err != nil {
+					debug.Printf("uasc %d: client certificate refused at OpenSecureChannel: %v", s.c.ID(), err)
+					s.c.SendError(ua.StatusBadCertificateUntrusted)
+					return nil, ua.StatusBadCertificateUntrusted
+				}
+			}
 
 			remoteCert, err := x509.ParseCertificate(s.cfg.RemoteCertificate)
 			if err != nil {
@@ -977,7 +1004,7 @@ func (s *SecureChannel) sendRequestWithTimeout(
 		return ctx.Err()
 	case <-s.disconnected:
 		s.popHandler(reqID)
-		return io.EOF
+		return s.disconnectErr()
 	case msg := <-ch:
 		if msg.Err != nil {
 			if msg.Response() != nil {
@@ -990,6 +1017,26 @@ func (s *SecureChannel) sendRequestWithTimeout(
 		s.popHandler(reqID)
 		return ua.StatusBadTimeout
 	}
+}
+
+func (s *SecureChannel) setTerminalErr(err error) {
+	s.terminalErrMu.Lock()
+	defer s.terminalErrMu.Unlock()
+	if s.terminalErr == nil {
+		s.terminalErr = err
+	}
+}
+
+// disconnectErr is what a request waiting on a channel that disconnected
+// is answered with: the ERR message the peer sent, if it sent one, and
+// io.EOF otherwise.
+func (s *SecureChannel) disconnectErr() error {
+	s.terminalErrMu.Lock()
+	defer s.terminalErrMu.Unlock()
+	if s.terminalErr != nil {
+		return s.terminalErr
+	}
+	return io.EOF
 }
 
 func (s *SecureChannel) popHandler(reqID uint32) (chan *MessageBody, bool) {

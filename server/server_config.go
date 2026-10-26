@@ -27,6 +27,25 @@ func PrivateKey(key *rsa.PrivateKey) Option {
 	}
 }
 
+// ClientCertificateVerifier decides whether a client's application instance
+// certificate, DER encoded, may open a secure channel or a session with the
+// server. A non-nil error refuses it.
+type ClientCertificateVerifier func(cert []byte) error
+
+// VerifyClientCertificate installs the verifier the server asks about every
+// client certificate. It is asked at OpenSecureChannel about the sender
+// certificate of every channel under a policy other than None, and at
+// CreateSession about the ClientCertificate of every session, before the
+// session exists. A refusal is answered with Bad_CertificateUntrusted: as an
+// ERR message that closes the connection at the channel, and as a
+// ServiceFault at the session. Without a verifier every certificate is
+// accepted, which is what the server did before the option existed.
+func VerifyClientCertificate(fn ClientCertificateVerifier) Option {
+	return func(s *serverConfig) {
+		s.verifyClientCertificate = fn
+	}
+}
+
 // EndPointHostName adds an additional endpoint to the server based on the host name
 func EndPoint(host string, port int) Option {
 	return func(s *serverConfig) {

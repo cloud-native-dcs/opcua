@@ -67,6 +67,10 @@ type serverConfig struct {
 	enabledSec  []security
 	enabledAuth []authMode
 
+	// verifyClientCertificate is asked about every client certificate, at
+	// OpenSecureChannel and at CreateSession; nil accepts every one.
+	verifyClientCertificate ClientCertificateVerifier
+
 	cap ServerCapabilities
 
 	logger Logger
@@ -116,7 +120,7 @@ func New(opts ...Option) *Server {
 	s := &Server{
 		url:      url,
 		cfg:      cfg,
-		cb:       newChannelBroker(cfg.logger),
+		cb:       newChannelBroker(cfg.logger, cfg.verifyClientCertificate),
 		sb:       newSessionBroker(cfg.logger),
 		handlers: make(map[uint16]Handler),
 		namespaces: []NameSpace{
@@ -171,6 +175,24 @@ func New(opts ...Option) *Server {
 
 func (s *Server) Session(hdr *ua.RequestHeader) *session {
 	return s.sb.Session(hdr.AuthenticationToken)
+}
+
+// SessionInfo describes one session the server holds.
+type SessionInfo struct {
+	// ID is the session id the client was given at CreateSession.
+	ID *ua.NodeID
+	// ClientCertificate is the DER certificate the client presented at
+	// CreateSession, and nil when it presented none.
+	ClientCertificate []byte
+	// Created is when the session was created.
+	Created time.Time
+}
+
+// Sessions lists every session the server holds, oldest first: each one a
+// client created and has not closed. It is what a diagnostic surface reads
+// to name the identity behind each session.
+func (s *Server) Sessions() []SessionInfo {
+	return s.sb.Sessions()
 }
 
 func (s *Server) Namespace(id int) (NameSpace, error) {
@@ -262,7 +284,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.setServerState(ua.ServerStateRunning)
 
 	if s.cb == nil {
-		s.cb = newChannelBroker(s.cfg.logger)
+		s.cb = newChannelBroker(s.cfg.logger, s.cfg.verifyClientCertificate)
 	}
 
 	go s.acceptAndRegister(ctx, s.l)
